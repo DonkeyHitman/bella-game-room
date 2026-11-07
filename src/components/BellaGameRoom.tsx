@@ -1,6 +1,108 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { LiveKitRoom, useLocalParticipant, useTracks } from '@livekit/components-react';
+import { Track } from 'livekit-client';
+
+export interface BellaGameRoomProps {
+  tableId?: string;
+  currentUserSeat?: string;
+  currentUserId?: string;
+  vsBots?: boolean;
+}
+
+// Inner component for Table-Affixed Simple Mic Button & Hold Reminder Message
+function TableMicController() {
+  const { localParticipant } = useLocalParticipant();
+  const [isTransmitting, setIsTransmitting] = useState(false);
+  const [showReminder, setShowReminder] = useState(false);
+
+  // Toggle microphone state
+  const toggleMicrophone = async () => {
+    if (!localParticipant) return;
+    const nextState = !isTransmitting;
+    setIsTransmitting(nextState);
+    try {
+      await localParticipant.setMicrophoneEnabled(nextState);
+    } catch (err) {
+      console.warn('Microphone toggle error:', err);
+      setIsTransmitting(false);
+    }
+  };
+
+  // Trigger reminder toast when clicked
+  const handleMicClick = () => {
+    toggleMicrophone();
+    setShowReminder(true);
+    setTimeout(() => {
+      setShowReminder(false);
+    }, 2500);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.code === 'Space' && !e.repeat && !isTransmitting && localParticipant) {
+        e.preventDefault();
+        setIsTransmitting(true);
+        try {
+          await localParticipant.setMicrophoneEnabled(true);
+        } catch (err) {
+          console.warn('Microphone activation deferred:', err);
+          setIsTransmitting(false);
+        }
+      }
+    };
+
+    const handleKeyUp = async (e: KeyboardEvent) => {
+      if (e.code === 'Space' && localParticipant) {
+        e.preventDefault();
+        setIsTransmitting(false);
+        try {
+          await localParticipant.setMicrophoneEnabled(false);
+        } catch (err) {
+          console.warn('Microphone deactivation error:', err);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [localParticipant, isTransmitting]);
+
+  return (
+    <div className="absolute right-4 bottom-4 z-30 flex items-center">
+      {/* Reminder Toast Message */}
+      {showReminder && (
+        <div className="absolute right-full mr-2.5 bg-[#231c18]/95 text-[#f3b23a] text-[10px] font-extrabold px-3 py-1.5 rounded-lg shadow-xl border border-[#d99b26]/50 whitespace-nowrap animate-fade-in pointer-events-none uppercase tracking-wider">
+          Hold button to talk
+        </div>
+      )}
+
+      {/* Simple Table Mic Icon Button */}
+      <button
+        onClick={handleMicClick}
+        className={`w-11 h-11 rounded-xl flex items-center justify-center border transition-all active:scale-95 shadow-xl ${
+          isTransmitting
+            ? 'bg-emerald-600/95 border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.5)] text-white'
+            : 'bg-[#231c18]/90 hover:bg-[#382e28] border-white/15 text-[#ece3d5]'
+        }`}
+        title="Mic Control"
+      >
+        <span className="text-lg">{isTransmitting ? '🎙️' : '🎤'}</span>
+      </button>
+    </div>
+  );
+}
+
+function RemoteAudioRenderer() {
+  useTracks([Track.Source.Microphone]);
+  return null;
+}
 
 // ==========================================
 // 1. DATA MODELS & TYPES
@@ -32,7 +134,7 @@ export interface Player {
   hand: Tile[];
   score: number;
   isBot?: boolean;
-  lastAction?: 'play' | 'pass' | null;
+  lastAction?: string | null;
   speechBubble?: string | null;
 }
 
@@ -339,8 +441,6 @@ export function placeTileOnChain(
 // ==========================================
 // 3. 4-PLAYER BLOCK DOMINOES RULES & SCORING
 // ==========================================
-const LOCAL_PLAYER_ID = 'NHA';
-
 const MEMBER_DATA: Record<string, { name: string; avatar: string }> = {
   'TUAN': { name: 'TUAN', avatar: '🧔🏽‍♂️' },
   'HA': { name: 'HA', avatar: '👩🏻' },
@@ -363,7 +463,8 @@ const SEATED_PLAYER_IDS = ['NHA', 'TIEN', 'TUAN', 'VUONG'];
 const BOT_QUIPS = {
   pass: ['Nothing to play?', 'Pass.', 'Ugh.'],
   almostOut: ['One left!', 'Just one tile.', 'Almost out.'],
-  standardWin: ['Win.', 'Domino.', 'Table locked.'],
+  standardWin: ['Out!', 'Got rid of them.', 'Cleaned hand.'],
+  dominoWin: ['Domino!'],
 };
 
 export function generateDoubleSixDeck(): Tile[] {
@@ -389,19 +490,22 @@ export function dealBlockDominoes(
   seatedIds: string[],
   existingScores: Record<string, number> = {},
   roundNumber = 1,
-  forcedStarterId: string | null = null
+  forcedStarterId: string | null = null,
+  activeUserId?: string
 ): GameState {
   const deck = shuffleDeck(generateDoubleSixDeck());
+  const resolvedLocalId = activeUserId || 'NHA';
 
   const players: Player[] = seatedIds.map((id, idx) => {
-    const memberInfo = MEMBER_DATA[id] || { name: id, avatar: '👤' };
+    const effectiveId = idx === 0 ? resolvedLocalId : id;
+    const memberInfo = MEMBER_DATA[effectiveId] || { name: effectiveId, avatar: '👤' };
     return {
-      id,
+      id: effectiveId,
       name: memberInfo.name,
       avatar: memberInfo.avatar,
       hand: deck.slice(idx * 7, (idx + 1) * 7),
-      score: existingScores[id] ?? 0,
-      isBot: id !== LOCAL_PLAYER_ID,
+      score: existingScores[effectiveId] ?? 0,
+      isBot: idx !== 0,
       lastAction: null,
       speechBubble: null,
     };
@@ -740,10 +844,12 @@ function SvgPipHalf({
 // ==========================================
 // 6. MAIN BELLA GAME ROOM COMPONENT
 // ==========================================
-export default function BellaGameRoom() {
+export default function BellaGameRoom({ tableId, currentUserSeat, currentUserId, vsBots }: BellaGameRoomProps) {
+  const resolvedUserId = currentUserId || 'NHA';
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null);
   const [slamShake, setSlamShake] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
 
   const [endOverlayPhase, setEndOverlayPhase] = useState<
     'none' | 'flash' | 'scoreboard' | 'inspectTable'
@@ -753,8 +859,17 @@ export default function BellaGameRoom() {
   const [viewportSize, setViewportSize] = useState({ width: 900, height: 340 });
 
   useEffect(() => {
-    setGameState(dealBlockDominoes(SEATED_PLAYER_IDS));
-  }, []);
+    setGameState(dealBlockDominoes(SEATED_PLAYER_IDS, {}, 1, null, resolvedUserId));
+  }, [resolvedUserId]);
+
+  const localPlayer = gameState?.players[0];
+
+  useEffect(() => {
+    fetch(`/api/livekit/token?room=${tableId || 'bellagameroom'}&username=${localPlayer?.name || resolvedUserId}`)
+      .then((res) => res.json())
+      .then((data) => setToken(data.token))
+      .catch((err) => console.error('LiveKit token fetch error:', err));
+  }, [tableId, localPlayer?.name, resolvedUserId]);
 
   useEffect(() => {
     const updateLayout = () => {
@@ -767,7 +882,6 @@ export default function BellaGameRoom() {
     return () => window.removeEventListener('resize', updateLayout);
   }, []);
 
-  const localPlayer = gameState?.players[0];
   const isMyTurn =
     gameState?.status === 'playing' && gameState?.currentTurnIndex === 0;
 
@@ -867,7 +981,7 @@ export default function BellaGameRoom() {
   const executeMoveOnSide = useCallback(
     (tileId: string, side: 'left' | 'right' | 'center') => {
       if (!isMyTurn || !gameState || !localPlayer) return;
-      const nextState = applyMove(gameState, LOCAL_PLAYER_ID, tileId, side);
+      const nextState = applyMove(gameState, localPlayer.id, tileId, side);
       const tileObj = localPlayer.hand.find((t) => t.id === tileId);
       if (
         tileObj &&
@@ -935,7 +1049,7 @@ export default function BellaGameRoom() {
 
     const starterId = gameState.nextRoundStarterId;
     setGameState(
-      dealBlockDominoes(SEATED_PLAYER_IDS, scoreMap, gameState.roundNumber + 1, starterId)
+      dealBlockDominoes(SEATED_PLAYER_IDS, scoreMap, gameState.roundNumber + 1, starterId, resolvedUserId)
     );
   };
 
@@ -966,469 +1080,481 @@ export default function BellaGameRoom() {
     gameState.status === 'blocked';
 
   return (
-    <div className="relative w-full h-screen overflow-hidden select-none bg-[#1c130d] flex flex-col justify-between font-sans m-0 p-0">
-      {/* ==========================================
-          1. TOP OPPONENT BAR
-          ========================================== */}
-      <header className="relative z-20 flex items-center justify-between w-full px-8 sm:px-14 pt-1.5 pb-1 shrink-0">
-        {opponents.map((opp, idx) => {
-          const actualIndex = idx + 1;
-          const isOppTurn =
-            gameState.status === 'playing' &&
-            gameState.currentTurnIndex === actualIndex;
+    <LiveKitRoom
+      token={token || undefined}
+      serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL}
+      connect={Boolean(token)}
+      audio={false}
+      video={false}
+      style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}
+    >
+      <RemoteAudioRenderer />
+      <div className="relative w-full h-screen overflow-hidden select-none bg-[#1c130d] flex flex-col justify-between font-sans m-0 p-0">
+        {/* ==========================================
+            1. TOP OPPONENT BAR
+            ========================================== */}
+        <header className="relative z-20 flex items-center justify-between w-full px-8 sm:px-14 pt-1.5 pb-1 shrink-0">
+          {opponents.map((opp, idx) => {
+            const actualIndex = idx + 1;
+            const isOppTurn =
+              gameState.status === 'playing' &&
+              gameState.currentTurnIndex === actualIndex;
 
-          return (
-            <div key={opp.id} className="relative flex flex-col items-center">
-              <div
-                className={`flex items-center gap-2 px-3 py-1 rounded-lg bg-[#231c18]/95 border transition-all ${
-                  isOppTurn
-                    ? 'border-[#e5a93c] shadow-[0_0_12px_rgba(229,169,60,0.45)]'
-                    : 'border-white/10'
-                }`}
-              >
-                <div className="w-7 h-7 rounded bg-[#382e28] flex items-center justify-center text-base border border-white/10">
-                  {opp.avatar}
-                </div>
-                <div className="leading-none pr-1">
-                  <p className="text-[10px] font-extrabold text-[#ece3d5] tracking-wider uppercase">
-                    {opp.name}
-                  </p>
-                  <p className="text-[10px] font-bold text-[#d99b26] mt-0.5">
-                    {opp.score}
-                  </p>
-                </div>
-              </div>
-              <div className="flex gap-0.5 mt-1">
-                {Array.from({ length: opp.hand.length }).map((_, tIdx) => (
-                  <div
-                    key={tIdx}
-                    className="w-1.5 h-2.5 rounded-[1px] bg-[#3a5a4b] border border-[#527a68]/60"
-                  />
-                ))}
-              </div>
-              {opp.speechBubble && (
-                <div className="absolute top-11 z-30 w-max max-w-[130px] bg-[#f4efe6] text-[#181512] text-[10px] font-bold px-2.5 py-1.5 rounded shadow-lg border border-black/20 whitespace-pre-line text-center leading-tight">
-                  {opp.speechBubble}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </header>
-
-      {/* ==========================================
-          2. FRAMED GREEN FELT TABLE
-          ========================================== */}
-      <div className="relative flex-1 w-full px-3 sm:px-6 py-1 flex items-center justify-center min-h-0">
-        <div
-          ref={viewportRef}
-          className={`relative w-full h-full rounded-2xl overflow-hidden border-[5px] border-[#5c3a21] shadow-[inset_0_0_70px_rgba(0,0,0,0.75),0_8px_25px_rgba(0,0,0,0.6)] flex items-center justify-center transition-transform duration-150 ${
-            slamShake ? 'scale-[1.01] translate-y-0.5' : ''
-          }`}
-          style={{
-            background:
-              'radial-gradient(circle at 50% 50%, #1c4d38 0%, #123727 70%, #0c261b 100%)',
-          }}
-        >
-          <div className="absolute inset-1.5 rounded-xl border border-[#c8963e]/20 pointer-events-none" />
-
-          {/* Watermark */}
-          <div className="absolute inset-x-0 bottom-8 flex flex-col items-center justify-center pointer-events-none opacity-15">
-            <span className="text-lg sm:text-xl font-serif font-black tracking-[0.25em] text-amber-200 uppercase">
-              BELLA GAME ROOM
-            </span>
-          </div>
-
-          <div
-            className="relative transition-transform duration-300 ease-out"
-            style={{
-              transform: `scale(${boardMetrics.fitScale}) translate3d(${-boardMetrics.bbox.centerX}px, ${-boardMetrics.bbox.centerY}px, 0)`,
-            }}
-          >
-            {gameState.board.map((placed) => (
-              <div
-                key={placed.id}
-                style={{
-                  width: `${placed.width}px`,
-                  height: `${placed.height}px`,
-                  transform: `translate3d(${placed.x - placed.width / 2}px, ${
-                    placed.y - placed.height / 2
-                  }px, 0)`,
-                }}
-                className={`absolute rounded-[4px] bg-[#ebe4d4] border-[1.5px] border-[#1f1a16] shadow-[0_3px_6px_rgba(0,0,0,0.45),inset_0_1px_1px_rgba(255,255,255,0.8)] flex ${
-                  placed.isVertical ? 'flex-col' : 'flex-row'
-                } items-center justify-between overflow-hidden transition-all duration-200`}
-              >
-                <div className={placed.isVertical ? 'w-full h-1/2' : 'w-1/2 h-full'}>
-                  <SvgPipHalf
-                    value={placed.visualPips[0]}
-                    isHorizontalTile={!placed.isVertical}
-                  />
-                </div>
+            return (
+              <div key={opp.id} className="relative flex flex-col items-center">
                 <div
-                  className={
-                    placed.isVertical
-                      ? 'w-4/5 h-[1.5px] bg-[#2c2520]'
-                      : 'h-4/5 w-[1.5px] bg-[#2c2520]'
-                  }
-                />
-                <div className={placed.isVertical ? 'w-full h-1/2' : 'w-1/2 h-full'}>
-                  <SvgPipHalf
-                    value={placed.visualPips[1]}
-                    isHorizontalTile={!placed.isVertical}
-                  />
-                </div>
-              </div>
-            ))}
-
-            {showLeftEndButton && leftAnchor && (
-              <button
-                onClick={() => executeMoveOnSide(selectedTileId!, 'left')}
-                style={{
-                  transform: `translate3d(${
-                    leftAnchor.x -
-                    ((leftAnchor.isRoot ? 'WEST' : leftAnchor.direction) === 'EAST'
-                      ? -leftAnchor.width / 2 - 18
-                      : leftAnchor.width / 2 + 18) -
-                    16
-                  }px, ${leftAnchor.y - 16}px, 0)`,
-                }}
-                className="absolute z-30 w-8 h-8 rounded-md bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-[11px] border-2 border-[#fff3d1] shadow-[0_0_15px_rgba(217,155,38,0.85)] flex items-center justify-center active:scale-95 transition"
-              >
-                &lt; {gameState.openEnds.left}
-              </button>
-            )}
-
-            {showRightEndButton && rightAnchor && (
-              <button
-                onClick={() => executeMoveOnSide(selectedTileId!, 'right')}
-                style={{
-                  transform: `translate3d(${
-                    rightAnchor.x +
-                    ((rightAnchor.isRoot ? 'EAST' : rightAnchor.direction) === 'WEST'
-                      ? -rightAnchor.width / 2 - 18
-                      : rightAnchor.width / 2 + 18) -
-                    16
-                  }px, ${rightAnchor.y - 16}px, 0)`,
-                }}
-                className="absolute z-30 w-8 h-8 rounded-md bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-[11px] border-2 border-[#fff3d1] shadow-[0_0_15px_rgba(217,155,38,0.85)] flex items-center justify-center active:scale-95 transition"
-              >
-                {gameState.openEnds.right} &gt;
-              </button>
-            )}
-          </div>
-
-          {/* ACTION PILL */}
-          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 z-20">
-            {isMyTurn && legalMoves.length === 0 ? (
-              <button
-                onClick={handlePassAction}
-                className="px-4 py-1 rounded bg-[#e8dfd1] hover:bg-white text-[#181512] font-extrabold text-[11px] tracking-wider uppercase shadow-lg border border-black/30 active:scale-95 transition"
-              >
-                NO TILE FITS: PASS
-              </button>
-            ) : isMyTurn && selectedTileId && (showLeftEndButton || showRightEndButton) ? (
-              <button
-                onClick={() =>
-                  executeMoveOnSide(
-                    selectedTileId,
-                    selectedTileMoves[0]?.side || 'right'
-                  )
-                }
-                className="px-4 py-1 rounded bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-extrabold text-[11px] tracking-wider uppercase shadow-md border border-[#fff3d1]/50 active:scale-95 transition"
-              >
-                {showLeftEndButton && showRightEndButton
-                  ? 'PICK AN END'
-                  : 'TAP AGAIN OR CLICK END TO PLAY'}
-              </button>
-            ) : isMyTurn ? (
-              <div className="px-3.5 py-0.5 rounded bg-[#d99b26] text-[#181512] font-extrabold text-[10px] tracking-wider uppercase shadow">
-                PICK A TILE
-              </div>
-            ) : null}
-          </div>
-
-          {/* FLASH OVERLAY */}
-          {isRoundOver && endOverlayPhase === 'flash' && (
-            <div className="absolute inset-0 z-40 bg-black/35 flex items-center justify-center pointer-events-none animate-pulse">
-              <h2 className="text-5xl sm:text-6xl font-black italic tracking-wider text-[#f3b23a] drop-shadow-[0_6px_12px_rgba(0,0,0,0.95)] uppercase">
-                {gameState.status === 'domino'
-                  ? 'DOMINO!'
-                  : gameState.status === 'win'
-                  ? 'WIN!'
-                  : 'BLOCKED!'}
-              </h2>
-            </div>
-          )}
-
-          {/* SCOREBOARD MODAL */}
-          {isRoundOver && endOverlayPhase === 'scoreboard' && (
-            <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-sm flex items-center justify-center p-1 sm:p-2">
-              <div className="w-full max-w-3xl rounded-xl bg-[#1f1712] border-2 border-[#d99b26] shadow-2xl p-2 flex flex-col justify-between max-h-[96vh]">
-                <div className="flex items-center justify-between border-b border-white/10 pb-1 px-1">
-                  <div>
-                    <h3 className="text-xs font-black text-[#f3b23a] tracking-wider uppercase">
-                      Round {gameState.roundNumber} Scoreboard —{' '}
-                      {gameState.status === 'domino'
-                        ? 'Domino'
-                        : gameState.status === 'win'
-                        ? 'Win'
-                        : 'Blocked'}
-                    </h3>
-                    <p className="text-[9px] text-[#b8ab99] font-semibold">
-                      {gameState.status === 'domino'
-                        ? gameState.wasPrecedingPlayerRisk
-                          ? 'Preceding player took a risk with alternate moves available (-6 pts penalty)'
-                          : 'Winner bridged both ends (+6 pts); forced opponents (-2 pts each)'
-                        : gameState.status === 'win'
-                        ? 'Winner emptied hand (+2 pts); others ranked by remaining pips'
-                        : gameState.wasForcedBlock
-                        ? 'Blocker was forced (+2 pts to lowest pips; others ranked by remaining pips)'
-                        : gameState.wasPrecedingPlayerRisk
-                        ? 'Preceding player took risk/baited block (+9 pts to preceding player; -9 pts to failed blocker)'
-                        : gameState.roundWinnerId === gameState.blockerPlayerId
-                        ? 'Successful block (+9 pts to blocker; opponents -3 pts each)'
-                        : 'Unsuccessful block (+9 pts to lowest pips; -9 pts to blocker)'}
+                  className={`flex items-center gap-2 px-3 py-1 rounded-lg bg-[#231c18]/95 border transition-all ${
+                    isOppTurn
+                      ? 'border-[#e5a93c] shadow-[0_0_12px_rgba(229,169,60,0.45)]'
+                      : 'border-white/10'
+                  }`}
+                >
+                  <div className="w-7 h-7 rounded bg-[#382e28] flex items-center justify-center text-base border border-white/10">
+                    {opp.avatar}
+                  </div>
+                  <div className="leading-none pr-1">
+                    <p className="text-[10px] font-extrabold text-[#ece3d5] tracking-wider uppercase">
+                      {opp.name}
+                    </p>
+                    <p className="text-[10px] font-bold text-[#d99b26] mt-0.5">
+                      {opp.score}
                     </p>
                   </div>
-                  <button
-                    onClick={() => setEndOverlayPhase('inspectTable')}
-                    className="px-2 py-0.5 rounded bg-[#382e28] hover:bg-[#4a3d35] text-[#ece3d5] font-bold text-[9px] uppercase tracking-wider border border-[#d99b26]/50 shadow active:scale-95 transition shrink-0"
-                  >
-                    View Table
-                  </button>
                 </div>
-
-                <div className="my-0.5 space-y-0.5">
-                  {rankedScoreboardPlayers.map((p, idx) => {
-                    const placeLabels = ['1st', '2nd', '3rd', '4th'];
-                    const isWinner = p.id === gameState.roundWinnerId;
-
-                    return (
-                      <div
-                        key={p.id}
-                        className={`flex items-center justify-between px-2 py-0.5 rounded-md border ${
-                          isWinner
-                            ? 'bg-[#2e2318] border-[#f3b23a]/70'
-                            : 'bg-[#16110d] border-white/10'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 min-w-[110px]">
-                          <span
-                            className={`w-5 text-center font-black text-[10px] uppercase ${
-                              isWinner ? 'text-[#f3b23a]' : 'text-[#a39788]'
-                            }`}
-                          >
-                            {placeLabels[idx] || `${idx + 1}th`}
-                          </span>
-                          <span className="text-xs">{p.avatar}</span>
-                          <div>
-                            <p className="text-[10px] font-extrabold text-[#ece3d5] uppercase leading-none">
-                              {p.name}
-                            </p>
-                            <p className="text-[8px] font-bold text-[#a39788] mt-[1px]">
-                              {p.hand.length === 0
-                                ? '0 pips (Out)'
-                                : `${p.remainingPips} pips left`}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-0.5 overflow-x-auto px-1">
-                          {p.hand.length === 0 ? (
-                            <span className="px-1.5 py-0.5 rounded bg-[#f3b23a]/20 text-[#f3b23a] font-black text-[8px] uppercase">
-                              {gameState.status === 'domino' ? 'DOMINO' : 'WIN'}
-                            </span>
-                          ) : (
-                            p.hand.map((t) => (
-                              <div
-                                key={t.id}
-                                className="w-[12px] h-[24px] rounded-[1px] bg-[#ebe4d4] border border-[#1f1a16] flex flex-col items-center justify-between overflow-hidden shrink-0"
-                                title={`${t.pips[0]}-${t.pips[1]} (${
-                                  t.pips[0] + t.pips[1]
-                                } pips)`}
-                              >
-                                <div className="w-full h-1/2">
-                                  <SvgPipHalf value={t.pips[0]} />
-                                </div>
-                                <div className="w-4/5 h-[0.5px] bg-[#2c2520]" />
-                                <div className="w-full h-1/2">
-                                  <SvgPipHalf value={t.pips[1]} />
-                                </div>
-                              </div>
-                            ))
-                          )}
-                        </div>
-
-                        <div className="text-right min-w-[65px]">
-                          <span
-                            className={`text-[10px] font-black leading-none block ${
-                              p.roundDelta > 0
-                                ? 'text-emerald-400'
-                                : p.roundDelta < 0
-                                ? 'text-rose-400'
-                                : 'text-neutral-400'
-                            }`}
-                          >
-                            {p.roundDelta > 0 ? `+${p.roundDelta}` : p.roundDelta} pts
-                          </span>
-                          <span className="text-[8px] font-bold text-[#d99b26] leading-none block mt-[2px]">
-                            Total: {p.score} pts
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
+                <div className="flex gap-0.5 mt-1">
+                  {Array.from({ length: opp.hand.length }).map((_, tIdx) => (
+                    <div
+                      key={tIdx}
+                      className="w-1.5 h-2.5 rounded-[1px] bg-[#3a5a4b] border border-[#527a68]/60"
+                    />
+                  ))}
                 </div>
-
-                <div className="flex items-center justify-end gap-2 pt-1 border-t border-white/10 px-1">
-                  <button
-                    onClick={() => setEndOverlayPhase('inspectTable')}
-                    className="px-3 py-1 rounded bg-[#382e28] hover:bg-[#4a3d35] text-[#ece3d5] font-bold text-[9px] uppercase tracking-wider border border-white/15 active:scale-95 transition"
-                  >
-                    Inspect Laid Tiles
-                  </button>
-                  <button
-                    onClick={startNextRound}
-                    className="px-4 py-1 rounded bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-[9px] uppercase tracking-wider shadow border border-[#fff3d1]/60 active:scale-95 transition"
-                  >
-                    Next Round
-                  </button>
-                </div>
+                {opp.speechBubble && (
+                  <div className="absolute top-11 z-30 w-max max-w-[130px] bg-[#f4efe6] text-[#181512] text-[10px] font-bold px-2.5 py-1.5 rounded shadow-lg border border-black/20 whitespace-pre-line text-center leading-tight">
+                    {opp.speechBubble}
+                  </div>
+                )}
               </div>
+            );
+          })}
+        </header>
+
+        {/* ==========================================
+            2. FRAMED TABLE (Metal Grey vs Green Felt)
+            ========================================== */}
+        <div className="relative flex-1 w-full px-3 sm:px-6 py-1 flex items-center justify-center min-h-0">
+          <div
+            ref={viewportRef}
+            className={`relative w-full h-full rounded-2xl overflow-hidden border-[5px] border-[#5c3a21] shadow-[inset_0_0_70px_rgba(0,0,0,0.75),0_8px_25px_rgba(0,0,0,0.6)] flex items-center justify-center transition-transform duration-150 ${
+              slamShake ? 'scale-[1.01] translate-y-0.5' : ''
+            }`}
+            style={{
+              background:
+                vsBots || tableId === 'bellagameroom'
+                  ? 'radial-gradient(ellipse at center, #4b525d 0%, #2b3038 65%, #181b20 100%)'
+                  : 'radial-gradient(ellipse at center, #1b4d3e 0%, #0f2c22 65%, #081711 100%)',
+            }}
+          >
+            <div className="absolute inset-1.5 rounded-xl border border-[#c8963e]/20 pointer-events-none" />
+
+            {/* Table-Affixed Mic Button (Mounted inside the yellow frame area) */}
+            <TableMicController />
+
+            {/* Watermark */}
+            <div className="absolute inset-x-0 bottom-8 flex flex-col items-center justify-center pointer-events-none opacity-15">
+              <span className="text-lg sm:text-xl font-serif font-black tracking-[0.25em] text-amber-200 uppercase">
+                BELLA GAME ROOM
+              </span>
             </div>
-          )}
-        </div>
-      </div>
 
-      {/* ==========================================
-          3. BOTTOM HUD: STRICTLY CENTERED HAND + DYNAMIC LEFT NHA + FIXED RIGHT QUEUE
-          ========================================== */}
-      <footer className="relative z-20 w-full px-3 sm:px-6 pb-2 pt-1 shrink-0 min-h-[104px] flex items-end">
-        {/* INNER FULL-WIDTH CONTAINER MATCHING TABLE BOUNDS */}
-        <div className="relative w-full h-[92px]">
-
-          {/* CENTERED HAND CONTAINER (Stays perfectly centered relative to the table at all times) */}
-          <div className="absolute left-1/2 bottom-0 -translate-x-1/2 flex items-center justify-center gap-1.5 sm:gap-2 h-full z-10 transition-all duration-300">
-
-            {/* DYNAMIC NHA CARD (Anchored to the left of the centered hand) */}
-            <div className="absolute right-full mr-3 sm:mr-4 bottom-0 flex flex-col justify-end gap-2 shrink-0 h-full transition-all duration-300 z-30">
-              {localPlayer.speechBubble && (
-                <div className="absolute bottom-full right-0 mb-2 z-30 w-max bg-[#f4efe6] text-[#181512] text-2xl font-bold px-3 py-1.5 rounded-xl shadow-lg border border-black/20 text-center animate-bounce">
-                  {localPlayer.speechBubble}
+            <div
+              className="relative transition-transform duration-300 ease-out"
+              style={{
+                transform: `scale(${boardMetrics.fitScale}) translate3d(${-boardMetrics.bbox.centerX}px, ${-boardMetrics.bbox.centerY}px, 0)`,
+              }}
+            >
+              {gameState.board.map((placed) => (
+                <div
+                  key={placed.id}
+                  style={{
+                    width: `${placed.width}px`,
+                    height: `${placed.height}px`,
+                    transform: `translate3d(${placed.x - placed.width / 2}px, ${placed.y - placed.height / 2}px, 0)`,
+                  }}
+                  className={`absolute rounded-[4px] bg-[#ebe4d4] border-[1.5px] border-[#1f1a16] shadow-[0_3px_6px_rgba(0,0,0,0.45),inset_0_1px_1px_rgba(255,255,255,0.8)] flex ${
+                    placed.isVertical ? 'flex-col' : 'flex-row'
+                  } items-center justify-between overflow-hidden transition-all duration-200`}
+                >
+                  <div className={placed.isVertical ? 'w-full h-1/2' : 'w-1/2 h-full'}>
+                    <SvgPipHalf
+                      value={placed.visualPips[0]}
+                      isHorizontalTile={!placed.isVertical}
+                    />
+                  </div>
+                  <div
+                    className={
+                      placed.isVertical
+                        ? 'w-4/5 h-[1.5px] bg-[#2c2520]'
+                        : 'h-4/5 w-[1.5px] bg-[#2c2520]'
+                    }
+                  />
+                  <div className={placed.isVertical ? 'w-full h-1/2' : 'w-1/2 h-full'}>
+                    <SvgPipHalf
+                      value={placed.visualPips[1]}
+                      isHorizontalTile={!placed.isVertical}
+                    />
+                  </div>
                 </div>
+              ))}
+
+              {showLeftEndButton && leftAnchor && (
+                <button
+                  onClick={() => executeMoveOnSide(selectedTileId!, 'left')}
+                  style={{
+                    transform: `translate3d(${
+                      leftAnchor.x -
+                      ((leftAnchor.isRoot ? 'WEST' : leftAnchor.direction) === 'EAST'
+                        ? -leftAnchor.width / 2 - 18
+                        : leftAnchor.width / 2 + 18) -
+                      16
+                    }px, ${leftAnchor.y - 16}px, 0)`,
+                  }}
+                  className="absolute z-30 w-8 h-8 rounded-md bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-[11px] border-2 border-[#fff3d1] shadow-[0_0_15px_rgba(217,155,38,0.85)] flex items-center justify-center active:scale-95 transition"
+                >
+                  &lt; {gameState.openEnds.left}
+                </button>
               )}
-              {isMyTurn && legalMoves.length === 0 && (
+
+              {showRightEndButton && rightAnchor && (
+                <button
+                  onClick={() => executeMoveOnSide(selectedTileId!, 'right')}
+                  style={{
+                    transform: `translate3d(${
+                      rightAnchor.x +
+                      ((rightAnchor.isRoot ? 'EAST' : rightAnchor.direction) === 'WEST'
+                        ? -rightAnchor.width / 2 - 18
+                        : rightAnchor.width / 2 + 18) -
+                      16
+                    }px, ${rightAnchor.y - 16}px, 0)`,
+                  }}
+                  className="absolute z-30 w-8 h-8 rounded-md bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-[11px] border-2 border-[#fff3d1] shadow-[0_0_15px_rgba(217,155,38,0.85)] flex items-center justify-center active:scale-95 transition"
+                >
+                  {gameState.openEnds.right} &gt;
+                </button>
+              )}
+            </div>
+
+            {/* ACTION PILL */}
+            <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 z-20">
+              {isMyTurn && legalMoves.length === 0 ? (
                 <button
                   onClick={handlePassAction}
-                  className="w-full px-4 py-1.5 rounded-lg font-black text-xs uppercase bg-red-600 text-white border-2 border-red-300 shadow-lg hover:bg-red-500 active:scale-95 transition whitespace-nowrap text-center shrink-0"
+                  className="px-4 py-1 rounded bg-[#e8dfd1] hover:bg-white text-[#181512] font-extrabold text-[11px] tracking-wider uppercase shadow-lg border border-black/30 active:scale-95 transition"
                 >
-                  Pass / Knock
+                  NO TILE FITS: PASS
                 </button>
-              )}
-              <div
-                className={`flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#231c18]/95 border transition-all whitespace-nowrap shrink-0 ${
-                  isMyTurn
-                    ? 'border-[#e5a93c] shadow-[0_0_15px_rgba(229,169,60,0.4)]'
-                    : 'border-white/10'
-                }`}
-              >
-                <div className="w-9 h-9 rounded-lg bg-[#382e28] flex items-center justify-center text-xl border border-white/10">
-                  {localPlayer.avatar}
+              ) : isMyTurn && selectedTileId && (showLeftEndButton || showRightEndButton) ? (
+                <button
+                  onClick={() =>
+                    executeMoveOnSide(
+                      selectedTileId,
+                      selectedTileMoves[0]?.side || 'right'
+                    )
+                  }
+                  className="px-4 py-1 rounded bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-extrabold text-[11px] tracking-wider uppercase shadow-md border border-[#fff3d1]/50 active:scale-95 transition"
+                >
+                  {showLeftEndButton && showRightEndButton
+                    ? 'PICK AN END'
+                    : 'TAP AGAIN OR CLICK END TO PLAY'}
+                </button>
+              ) : isMyTurn ? (
+                <div className="px-3.5 py-0.5 rounded bg-[#d99b26] text-[#181512] font-extrabold text-[10px] tracking-wider uppercase shadow">
+                  PICK A TILE
                 </div>
-                <div className="leading-tight">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-extrabold text-[#ece3d5] uppercase">
-                      {localPlayer.name}
-                    </span>
-                    <span className="text-xs font-black text-[#e5a93c]">
-                      {localPlayer.score} pts
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-[#a39788] font-semibold mt-0.5 uppercase">
-                    ROUND {gameState.roundNumber} • 4P BLOCK
-                  </p>
-                </div>
-              </div>
+              ) : null}
             </div>
 
-            {/* Hand Tiles */}
-            {isRoundOver ? (
-              <div className="flex items-center gap-2.5">
-                {endOverlayPhase === 'inspectTable' && (
-                  <button
-                    onClick={() => setEndOverlayPhase('scoreboard')}
-                    className="px-5 py-2.5 rounded-lg bg-[#382e28] hover:bg-[#4a3d35] text-[#ece3d5] font-black text-xs sm:text-sm tracking-wider uppercase shadow-xl border-2 border-[#d99b26]/70 active:scale-95 transition"
-                  >
-                    Back to Scoreboard
-                  </button>
-                )}
-                <button
-                  onClick={startNextRound}
-                  className="px-6 py-2.5 rounded-lg bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-xs sm:text-sm tracking-wider uppercase shadow-xl border-2 border-[#fff3d1]/60 active:scale-95 transition"
-                >
-                  NEXT ROUND
-                </button>
+            {/* FLASH OVERLAY */}
+            {isRoundOver && endOverlayPhase === 'flash' && (
+              <div className="absolute inset-0 z-40 bg-black/35 flex items-center justify-center pointer-events-none animate-pulse">
+                <h2 className="text-5xl sm:text-6xl font-black italic tracking-wider text-[#f3b23a] drop-shadow-[0_6px_12px_rgba(0,0,0,0.95)] uppercase">
+                  {gameState.status === 'domino'
+                    ? 'DOMINO!'
+                    : gameState.status === 'win'
+                    ? 'WIN!'
+                    : 'BLOCKED!'}
+                </h2>
               </div>
-            ) : (
-              localPlayer.hand.map((tile) => {
-                const isPlayable = isMyTurn && playableTileIds.has(tile.id);
-                const isSelected = selectedTileId === tile.id;
+            )}
 
-                return (
-                  <button
-                    key={tile.id}
-                    onClick={() => handleHandTileClick(tile.id)}
-                    style={{ width: '46px', height: '92px' }}
-                    className={`relative rounded-[6px] bg-[#ebe4d4] border-[2px] border-[#1f1a16] flex flex-col items-center justify-between overflow-hidden transition-all duration-150 shrink-0 ${
-                      isSelected
-                        ? '-translate-y-2.5 ring-[3px] ring-[#f3b23a] shadow-[0_10px_20px_rgba(0,0,0,0.65)]'
-                        : isPlayable
-                        ? '-translate-y-1 hover:-translate-y-2 shadow-[0_5px_10px_rgba(0,0,0,0.5)] cursor-pointer'
-                        : 'opacity-75 brightness-90 cursor-not-allowed'
-                    }`}
-                  >
-                    <div className="w-full h-1/2">
-                      <SvgPipHalf value={tile.pips[0]} />
+            {/* SCOREBOARD MODAL */}
+            {isRoundOver && endOverlayPhase === 'scoreboard' && (
+              <div className="absolute inset-0 z-40 bg-black/75 backdrop-blur-sm flex items-center justify-center p-1 sm:p-2">
+                <div className="w-full max-w-3xl rounded-xl bg-[#1f1712] border-2 border-[#d99b26] shadow-2xl p-2 flex flex-col justify-between max-h-[96vh]">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-1 px-1">
+                    <div>
+                      <h3 className="text-xs font-black text-[#f3b23a] tracking-wider uppercase">
+                        Round {gameState.roundNumber} Scoreboard —{' '}
+                        {gameState.status === 'domino'
+                          ? 'Domino'
+                          : gameState.status === 'win'
+                          ? 'Win'
+                          : 'Blocked'}
+                      </h3>
+                      <p className="text-[9px] text-[#b8ab99] font-semibold">
+                        {gameState.status === 'domino'
+                          ? gameState.wasPrecedingPlayerRisk
+                            ? 'Preceding player took a risk with alternate moves available (-6 pts penalty)'
+                            : 'Winner bridged both ends (+6 pts); forced opponents (-2 pts each)'
+                          : gameState.status === 'win'
+                          ? 'Winner emptied hand (+2 pts); others ranked by remaining pips'
+                          : gameState.wasForcedBlock
+                          ? 'Blocker was forced (+2 pts to lowest pips; others ranked by remaining pips)'
+                          : gameState.wasPrecedingPlayerRisk
+                          ? 'Preceding player took risk/baited block (+9 pts to preceding player; -9 pts to failed blocker)'
+                          : gameState.roundWinnerId === gameState.blockerPlayerId
+                          ? 'Successful block (+9 pts to blocker; opponents -3 pts each)'
+                          : 'Unsuccessful block (+9 pts to lowest pips; -9 pts to blocker)'}
+                      </p>
                     </div>
-                    <div className="w-4/5 h-[2px] bg-[#2c2520] shrink-0" />
-                    <div className="w-full h-1/2">
-                      <SvgPipHalf value={tile.pips[1]} />
-                    </div>
-                  </button>
-                );
-              })
+                    <button
+                      onClick={() => setEndOverlayPhase('inspectTable')}
+                      className="px-2 py-0.5 rounded bg-[#382e28] hover:bg-[#4a3d35] text-[#ece3d5] font-bold text-[9px] uppercase tracking-wider border border-[#d99b26]/50 shadow active:scale-95 transition shrink-0"
+                    >
+                      View Table
+                    </button>
+                  </div>
+
+                  <div className="my-0.5 space-y-0.5">
+                    {rankedScoreboardPlayers.map((p, idx) => {
+                      const placeLabels = ['1st', '2nd', '3rd', '4th'];
+                      const isWinner = p.id === gameState.roundWinnerId;
+
+                      return (
+                        <div
+                          key={p.id}
+                          className={`flex items-center justify-between px-2 py-0.5 rounded-md border ${
+                            isWinner
+                              ? 'bg-[#2e2318] border-[#f3b23a]/70'
+                              : 'bg-[#16110d] border-white/10'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-[110px]">
+                            <span
+                              className={`w-5 text-center font-black text-[10px] uppercase ${
+                                isWinner ? 'text-[#f3b23a]' : 'text-[#a39788]'
+                              }`}
+                            >
+                              {placeLabels[idx] || `${idx + 1}th`}
+                            </span>
+                            <span className="text-xs">{p.avatar}</span>
+                            <div>
+                              <p className="text-[10px] font-extrabold text-[#ece3d5] uppercase leading-none">
+                                {p.name}
+                              </p>
+                              <p className="text-[8px] font-bold text-[#a39788] mt-[1px]">
+                                {p.hand.length === 0
+                                  ? '0 pips (Out)'
+                                  : `${p.remainingPips} pips left`}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-0.5 overflow-x-auto px-1">
+                            {p.hand.length === 0 ? (
+                              <span className="px-1.5 py-0.5 rounded bg-[#f3b23a]/20 text-[#f3b23a] font-black text-[8px] uppercase">
+                                {gameState.status === 'domino' ? 'DOMINO' : 'WIN'}
+                              </span>
+                            ) : (
+                              p.hand.map((t) => (
+                                <div
+                                  key={t.id}
+                                  className="w-[12px] h-[24px] rounded-[1px] bg-[#ebe4d4] border border-[#1f1a16] flex flex-col items-center justify-between overflow-hidden shrink-0"
+                                  title={`${t.pips[0]}-${t.pips[1]} (${
+                                    t.pips[0] + t.pips[1]
+                                  } pips)`}
+                                >
+                                  <div className="w-full h-1/2">
+                                    <SvgPipHalf value={t.pips[0]} />
+                                  </div>
+                                  <div className="w-4/5 h-[0.5px] bg-[#2c2520]" />
+                                  <div className="w-full h-1/2">
+                                    <SvgPipHalf value={t.pips[1]} />
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          <div className="text-right min-w-[65px]">
+                            <span
+                              className={`text-[10px] font-black leading-none block ${
+                                p.roundDelta > 0
+                                  ? 'text-emerald-400'
+                                  : p.roundDelta < 0
+                                  ? 'text-rose-400'
+                                  : 'text-neutral-400'
+                              }`}
+                            >
+                              {p.roundDelta > 0 ? `+${p.roundDelta}` : p.roundDelta} pts
+                            </span>
+                            <span className="text-[8px] font-bold text-[#d99b26] leading-none block mt-[2px]">
+                              Total: {p.score} pts
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-white/10 px-1">
+                    <button
+                      onClick={() => setEndOverlayPhase('inspectTable')}
+                      className="px-3 py-1 rounded bg-[#382e28] hover:bg-[#4a3d35] text-[#ece3d5] font-bold text-[9px] uppercase tracking-wider border border-white/15 active:scale-95 transition"
+                    >
+                      Inspect Laid Tiles
+                    </button>
+                    <button
+                      onClick={startNextRound}
+                      className="px-4 py-1 rounded bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-[9px] uppercase tracking-wider shadow border border-[#fff3d1]/60 active:scale-95 transition"
+                    >
+                      Next Round
+                    </button>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
-
-          {/* RIGHT ZONE: QUEUE + LEAVE TABLE (Locked to right table border) */}
-          <div className="absolute right-0 bottom-0 flex flex-col justify-end gap-1.5 w-[140px] shrink-0 h-[92px] z-30">
-            <div className="flex flex-col p-1.5 px-2 rounded-lg bg-[#231c18]/95 border border-white/10 shadow-lg flex-1 justify-center">
-              <div className="flex items-center justify-between mb-0.5 pb-0.5 border-b border-white/5">
-                <span className="text-[9px] font-black text-[#a39788] uppercase tracking-wider">Queue</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <div className="flex items-center justify-between text-[9px] font-bold text-[#ece3d5]">
-                  <span>1. HIEU</span>
-                  <span className="text-[#d99b26] text-[7px] uppercase">Ready</span>
-                </div>
-                <div className="flex items-center justify-between text-[9px] font-bold text-[#ece3d5]">
-                  <span>2. MINH</span>
-                  <span className="text-[#a39788] text-[7px] uppercase">Lobby</span>
-                </div>
-              </div>
-            </div>
-            <button
-              className="w-full py-1.5 rounded-lg font-black text-[9px] uppercase bg-[#382e28] hover:bg-red-600 hover:border-red-400 text-[#ece3d5] hover:text-white border border-white/10 shadow-lg active:scale-95 transition shrink-0"
-              onClick={() => console.log('Leave Table triggered')}
-            >
-              Leave Table
-            </button>
-          </div>
-
         </div>
-      </footer>
-    </div>
+
+        {/* ==========================================
+            3. BOTTOM HUD
+            ========================================== */}
+        <footer className="relative z-20 w-full px-3 sm:px-6 pb-2 pt-1 shrink-0 min-h-[104px] flex items-end">
+          <div className="relative w-full h-[92px]">
+
+            {/* CENTERED HAND CONTAINER */}
+            <div className="absolute left-1/2 bottom-0 -translate-x-1/2 flex items-center justify-center gap-1.5 sm:gap-2 h-full z-10 transition-all duration-300">
+
+              {/* DYNAMIC LOCAL PLAYER CARD */}
+              <div className="absolute right-full mr-3 sm:mr-4 bottom-0 flex flex-col justify-end gap-2 shrink-0 h-full transition-all duration-300 z-30">
+                {localPlayer.speechBubble && (
+                  <div className="absolute bottom-full right-0 mb-2 z-30 w-max bg-[#f4efe6] text-[#181512] text-2xl font-bold px-3 py-1.5 rounded-xl shadow-lg border border-black/20 text-center animate-bounce">
+                    {localPlayer.speechBubble}
+                  </div>
+                )}
+                {isMyTurn && legalMoves.length === 0 && (
+                  <button
+                    onClick={handlePassAction}
+                    className="w-full px-4 py-1.5 rounded-lg font-black text-xs uppercase bg-red-600 text-white border-2 border-red-300 shadow-lg hover:bg-red-500 active:scale-95 transition whitespace-nowrap text-center shrink-0"
+                  >
+                    Pass / Knock
+                  </button>
+                )}
+                <div
+                  className={`flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#231c18]/95 border transition-all whitespace-nowrap shrink-0 ${
+                    isMyTurn
+                      ? 'border-[#e5a93c] shadow-[0_0_15px_rgba(229,169,60,0.4)]'
+                      : 'border-white/10'
+                  }`}
+                >
+                  <div className="w-9 h-9 rounded-lg bg-[#382e28] flex items-center justify-center text-xl border border-white/10">
+                    {localPlayer.avatar}
+                  </div>
+                  <div className="leading-tight">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-extrabold text-[#ece3d5] uppercase">
+                        {localPlayer.name}
+                      </span>
+                      <span className="text-xs font-black text-[#e5a93c]">
+                        {localPlayer.score} pts
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-[#a39788] font-semibold mt-0.5 uppercase">
+                      ROUND {gameState.roundNumber} • 4P BLOCK
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Hand Tiles */}
+              {isRoundOver ? (
+                <div className="flex items-center gap-2.5">
+                  {endOverlayPhase === 'inspectTable' && (
+                    <button
+                      onClick={() => setEndOverlayPhase('scoreboard')}
+                      className="px-5 py-2.5 rounded-lg bg-[#382e28] hover:bg-[#4a3d35] text-[#ece3d5] font-black text-xs sm:text-sm tracking-wider uppercase shadow-xl border-2 border-[#d99b26]/70 active:scale-95 transition"
+                    >
+                      Back to Scoreboard
+                    </button>
+                  )}
+                  <button
+                    onClick={startNextRound}
+                    className="px-6 py-2.5 rounded-lg bg-[#d99b26] hover:bg-[#eab03e] text-[#181512] font-black text-xs sm:text-sm tracking-wider uppercase shadow-xl border-2 border-[#fff3d1]/60 active:scale-95 transition"
+                  >
+                    NEXT ROUND
+                  </button>
+                </div>
+              ) : (
+                localPlayer.hand.map((tile) => {
+                  const isPlayable = isMyTurn && playableTileIds.has(tile.id);
+                  const isSelected = selectedTileId === tile.id;
+
+                  return (
+                    <button
+                      key={tile.id}
+                      onClick={() => handleHandTileClick(tile.id)}
+                      style={{ width: '46px', height: '92px' }}
+                      className={`relative rounded-[6px] bg-[#ebe4d4] border-[2px] border-[#1f1a16] flex flex-col items-center justify-between overflow-hidden transition-all duration-150 shrink-0 ${
+                        isSelected
+                          ? '-translate-y-2.5 ring-[3px] ring-[#f3b23a] shadow-[0_10px_20px_rgba(0,0,0,0.65)]'
+                          : isPlayable
+                          ? '-translate-y-1 hover:-translate-y-2 shadow-[0_5px_10px_rgba(0,0,0,0.5)] cursor-pointer'
+                          : 'opacity-75 brightness-90 cursor-not-allowed'
+                      }`}
+                    >
+                      <div className="w-full h-1/2">
+                        <SvgPipHalf value={tile.pips[0]} />
+                      </div>
+                      <div className="w-4/5 h-[2px] bg-[#2c2520] shrink-0" />
+                      <div className="w-full h-1/2">
+                        <SvgPipHalf value={tile.pips[1]} />
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+
+            {/* RIGHT ZONE: QUEUE + LEAVE TABLE (Clean & Restored) */}
+            <div className="absolute right-0 bottom-0 flex flex-col justify-end gap-1.5 w-[140px] shrink-0 h-[92px] z-30">
+              <div className="flex flex-col p-1.5 px-2 rounded-lg bg-[#231c18]/95 border border-white/10 shadow-lg flex-1 justify-center">
+                <div className="flex items-center justify-between mb-0.5 pb-0.5 border-b border-white/5">
+                  <span className="text-[9px] font-black text-[#a39788] uppercase tracking-wider">Queue</span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex items-center justify-between text-[9px] font-bold text-[#ece3d5]">
+                    <span>1. HIEU</span>
+                    <span className="text-[#d99b26] text-[7px] uppercase">Ready</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[9px] font-bold text-[#ece3d5]">
+                    <span>2. MINH</span>
+                    <span className="text-[#a39788] text-[7px] uppercase">Lobby</span>
+                  </div>
+                </div>
+              </div>
+              <button
+                className="w-full py-1.5 rounded-lg font-black text-[9px] uppercase bg-[#382e28] hover:bg-red-600 hover:border-red-400 text-[#ece3d5] hover:text-white border border-white/10 shadow-lg active:scale-95 transition shrink-0"
+                onClick={() => { window.location.href = window.location.origin + window.location.pathname; }}
+              >
+                Leave Table
+              </button>
+            </div>
+
+          </div>
+        </footer>
+      </div>
+    </LiveKitRoom>
   );
 }

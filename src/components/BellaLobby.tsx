@@ -172,8 +172,6 @@ export default function BellaLobby() {
     });
   }, [membersList]);
 
-  const numCols = Math.max(7, Math.ceil(rankedMembers.length / 2));
-
   const totalSeatedCount =
     Object.values(rooms.yatescastle.seats).filter(Boolean).length +
     Object.values(rooms.charrington.seats).filter(Boolean).length;
@@ -432,7 +430,7 @@ export default function BellaLobby() {
         </div>
       </header>
 
-      {/* STRICT 2-ROW DIRECTORY */}
+      {/* HORIZONTALLY SCROLLABLE 2-ROW DIRECTORY */}
       <div className="shrink-0 w-full p-1 border border-white/15 bg-[#1f232a]/90 backdrop-blur-sm rounded-xl my-0.5 shadow-md">
         <div className="flex items-center justify-between pb-0.5 px-1">
           <span className="text-[7.5px] sm:text-[8px] font-bold uppercase tracking-widest text-[#94a3b8]">
@@ -443,59 +441,61 @@ export default function BellaLobby() {
           {selectedMember && (
             <button
               onClick={() => setSelectedMember(null)}
-              className="text-[7.5px] text-amber-400 hover:underline uppercase font-bold"
+              className="text-[7.5px] text-amber-400 hover:underline uppercase font-bold cursor-pointer"
             >
               Clear
             </button>
           )}
         </div>
 
-        <div
-          className="grid gap-0.5 sm:gap-1 w-full"
-          style={{
-            gridTemplateRows: 'repeat(2, minmax(0, 1fr))',
-            gridTemplateColumns: `repeat(${numCols}, minmax(0, 1fr))`,
-            gridAutoFlow: 'column',
-          }}
-        >
-          {rankedMembers.map((m, idx) => {
-            const rankLabel = getOrdinal(idx + 1);
-            const isSelected = selectedMember?.id === m.id;
+        <div className="w-full overflow-x-auto whitespace-nowrap pb-1.5 scrollbar-thin">
+          <div
+            className="inline-grid gap-1"
+            style={{
+              gridTemplateRows: 'repeat(2, minmax(0, 1fr))',
+              gridAutoColumns: 'minmax(110px, auto)',
+              gridAutoFlow: 'column',
+            }}
+          >
+            {rankedMembers.map((m, idx) => {
+              const rankLabel = getOrdinal(idx + 1);
+              const isSelected = selectedMember?.id === m.id;
 
-            return (
-              <button
-                type="button"
-                key={m.id}
-                onClick={() => setSelectedMember(m)}
-                className={`flex items-center justify-between px-1 py-0.5 rounded text-[8px] sm:text-[9px] shadow-xs cursor-pointer transition-all overflow-hidden ${
-                  isSelected
-                    ? 'bg-[#f59e0b] text-[#0f172a] ring-1 ring-[#fef3c7] scale-[1.02] shadow-[0_0_8px_rgba(245,158,11,0.6)] font-black'
-                    : 'bg-[#2b303a]/90 hover:bg-[#384050] text-[#f8fafc] border border-white/10'
-                }`}
-              >
-                <div className="flex items-center gap-0.5 truncate">
-                  <span
-                    className={`font-mono font-black text-[7px] sm:text-[8px] ${
-                      isSelected
-                        ? 'text-[#0f172a]'
-                        : idx === 0
-                        ? 'text-[#fbbf24]'
-                        : idx === 1
-                        ? 'text-slate-100'
-                        : idx === 2
-                        ? 'text-[#f97316]'
-                        : 'text-[#94a3b8]'
-                    }`}
-                  >
-                    {rankLabel}
-                  </span>
-                  <span className="font-extrabold uppercase truncate tracking-tight">
-                    {m.name}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
+              return (
+                <button
+                  type="button"
+                  key={m.id}
+                  onClick={() => setSelectedMember(m)}
+                  className={`flex items-center justify-between px-2 py-1 rounded text-[8px] sm:text-[9px] shadow-xs cursor-pointer transition-all overflow-hidden ${
+                    isSelected
+                      ? 'bg-[#f59e0b] text-[#0f172a] ring-1 ring-[#fef3c7] scale-[1.02] shadow-[0_0_8px_rgba(245,158,11,0.6)] font-black'
+                      : 'bg-[#2b303a]/90 hover:bg-[#384050] text-[#f8fafc] border border-white/10'
+                  }`}
+                >
+                  <div className="flex items-center gap-1 truncate">
+                    <span
+                      className={`font-mono font-black text-[7px] sm:text-[8px] ${
+                        isSelected
+                          ? 'text-[#0f172a]'
+                          : idx === 0
+                          ? 'text-[#fbbf24]'
+                          : idx === 1
+                          ? 'text-slate-100'
+                          : idx === 2
+                          ? 'text-[#f97316]'
+                          : 'text-[#94a3b8]'
+                      }`}
+                    >
+                      {rankLabel}
+                    </span>
+                    <span className="font-extrabold uppercase truncate tracking-tight">
+                      {m.name}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
